@@ -10,6 +10,19 @@ using Metalhead
 using JLD
 using BSON:@save,@load
 
+include("utils.jl")
+BASE_PATH = "../data/"
+
+# Load the models
+@load "cnn_encoder.bson" cnn_encoder
+@load "embedding.bson" embedding
+@load "rnn_decoder.bson" rnn_decoder
+@load "decoder.bson" decoder
+
+vgg = VGG19() |> gpu
+Flux.testmode!(vgg)
+vgg = vgg.layers[1:end-3] |> gpu
+
 function sample(image_path)
     img = Metalhead.preprocess(load(image_path)) |> gpu
     features = vgg(img) |> cpu
@@ -33,10 +46,6 @@ function sample(image_path)
     
     output
 end
-
-vgg = VGG19() |> gpu
-Flux.testmode!(vgg)
-vgg = vgg.layers[1:end-3] |> gpu
 
 punc = "!#%&()*+.,-/:;=?@[]^_`{|}~"
 punctuation = [punc[i] for i in 1:length(punc)]

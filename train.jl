@@ -21,9 +21,9 @@ BATCH_SIZE = 64
 EMBEDDING_DIM = 256
 HIDDEN_DIM = 512
 LOG_FREQUENCY = 10
-EPOCHS = 300
-SAVE_FREQUENCY = 10
-global_step = 1
+EPOCHS = 500
+SAVE_FREQUENCY = 100
+global global_step = 1
 
 punc = "!#%&()*+.,-/:;=?@[]^_`{|}~"
 punctuation = [punc[i] for i in 1:length(punc)]
@@ -64,12 +64,15 @@ image_names = [d[2] for d in data]
 
 function extract_embedding_features(image_names)
     # extract features from the images and save them to a file
+    println("Extracting features...")
     vgg = VGG19() |> gpu
     Flux.testmode!(vgg)
     vgg = vgg.layers[1:end-3] |> gpu
     
     features = Dict()
     for im_name in image_names
+    	println(im_name)
+
         if im_name in keys(features)
             continue
         end
@@ -131,14 +134,10 @@ function zero_grad!(model)
   model = mapleaves(nullify_grad!, model)
 end
 
-cnn_encoder = Chain(Dense(4096,EMBEDDING_DIM),x->relu.(x))
-embedding = Chain(Dense(length(vocab),EMBEDDING_DIM))
-rnn_decoder = Chain(LSTM(EMBEDDING_DIM,HIDDEN_DIM))
-decoder = Chain(Dense(HIDDEN_DIM,length(vocab)))
-
-function reset()
-    Flux.reset!(rnn_decoder.layers[1])
-end
+cnn_encoder = Chain(Dense(4096,EMBEDDING_DIM),x->relu.(x)) |> gpu
+embedding = Chain(Dense(length(vocab),EMBEDDING_DIM)) |> gpu
+rnn_decoder = Chain(LSTM(EMBEDDING_DIM,HIDDEN_DIM)) |> gpu
+decoder = Chain(Dense(HIDDEN_DIM,length(vocab))) |> gpu
 
 function zero_grad_models()
     zero_grad!(cnn_encoder)
@@ -147,7 +146,30 @@ function zero_grad_models()
     zero_grad!(decoder)
 end
 
-function save_models()
+function to_device()
+	cnn_encoder = cnn_encoder |> device
+	embedding = embedding |> device
+	rnn_decoder = rnn_decoder |> device
+	decoder = decoder |> device
+end
+
+function to_cpu()
+	cnn_encoder = cnn_encoder |> cpu
+	embedding = embedding |> cpu
+	rnn_decoder = rnn_decoder |> cpu
+	decoder = decoder |> cpu
+end
+
+function reset()
+    Flux.reset!(rnn_decoder.layers[1])
+end
+
+function save_models(cnn_encoder,embedding,rnn_decoder,decoder)
+	cnn_encoder = cnn_encoder |> cpu
+	embedding = embedding |> cpu
+	rnn_decoder = rnn_decoder |> cpu
+	decoder = decoder |> cpu
+
     reset()
     @save "cnn_encoder.bson" cnn_encoder
     @save "embedding.bson" embedding
@@ -160,7 +182,12 @@ function load_models()
     @load "embedding.bson" embedding
     @load "rnn_decoder.bson" rnn_decoder
     @load "decoder.bson" decoder
+    to_device()
 end
+
+# Move models to device
+# to_device()
+println("Move models to respective device...")
 
 function get_loss_val(mb_captions,mb_features,mb_targets)
     reset()
@@ -175,22 +202,48 @@ model_params = params(params(cnn_encoder)...,params(embedding)...,params(rnn_dec
 lr = 1e-4
 opt = ADAM(model_params,lr)
 
-for epoch in 1:EPOCHS
-    for idx in mb_idxs
-        mb_captions,mb_features,mb_targets = get_mb(idx,features)
-        zero_grad_models()
-        Flux.back!(get_loss_val(mb_captions,mb_features,mb_targets))
-        opt()
-        global_step += 1
-        
-        if global_step % LOG_FREQUENCY == 0
-            println("---Global Step : $(global_step)")
-            println("Loss : $(get_loss_val(mb_captions,mb_features,mb_targets))")
-        end
-        
-        if global_step % SAVE_FREQUENCY == 0
-            save_models()
-            println("Saved Models!")
-        end
+function train_step(idx)
+	global global_step
+    mb_captions,mb_features,mb_targets = get_mb(idx,features)
+
+    # Move data to device
+    mb_captions = gpu.(mb_captions)
+    mb_features =mb_features |> gpu
+    mb_targets = gpu.(mb_targets)
+
+    zero_grad_models()
+    Flux.back!(get_loss_val(mb_captions,mb_features,mb_targets))
+    opt()
+    global_step += 1
+    
+    if global_step % LOG_FREQUENCY == 0
+        println("---Global Step : $(global_step)")
+        println("Loss : $(get_loss_val(mb_captions,mb_features,mb_targets))")
+    end
+    
+    if global_step % SAVE_FREQUENCY == 0
+  #   	cnn_encoder = cnn_encoder |> cpu
+		# embedding = embedding |> cpu
+		# rnn_decoder = rnn_decoder |> cpu
+		# decoder = decoder |> cpu
+
+        save_models(cnn_encoder,embedding,rnn_decoder,decoder)
+        println("Saved Models!")
+
+  #       cnn_encoder = cnn_encoder |> gpu
+		# embedding = embedding |> gpu
+		# rnn_decoder = rnn_decoder |> gpu
+		# decoder = decoder |> gpu
     end
 end
+
+function train()
+	println(cnn_encoder)
+	for epoch in 1:EPOCHS
+		for idx in mb_idxs
+	    	train_step(idx)
+	    end
+	end
+end
+
+train()

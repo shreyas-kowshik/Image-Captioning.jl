@@ -7,7 +7,10 @@ function load_data(base_path::String,num_samples=10000,punctuation=['.'])
     images = json_data["images"]
     
     data = [] #(caption,image) tuple
+    count = 0
     for caption_data in captions
+	count += 1
+	println("Count : $(count)")
         image = [img for img in images if img["id"] == caption_data["image_id"]][1]
         caption = caption_data["caption"]
         for p in punctuation

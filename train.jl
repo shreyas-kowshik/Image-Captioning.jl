@@ -1,7 +1,10 @@
 using Pkg
 Pkg.activate(".")
+using CUDAnative
+device!(1)
 using JSON
 using WordTokenizers
+using Statistics
 using StatsBase
 using Flux,CuArrays
 using Flux:onehot
@@ -11,12 +14,12 @@ using JLD
 using BSON:@save,@load
 
 include("utils.jl")
-BASE_PATH = "../data/"
+BASE_PATH = "../../references/mscoco/"
 
 #--------HYPERPARAMETERS----------#
-NUM_SENTENCES = 5
+NUM_SENTENCES = 30000
 # Find top-k tokens
-K = 30
+K = 5000
 BATCH_SIZE = 64
 EMBEDDING_DIM = 256
 HIDDEN_DIM = 512
@@ -30,7 +33,7 @@ punctuation = [punc[i] for i in 1:length(punc)]
 data = load_data(BASE_PATH,NUM_SENTENCES,punctuation)
 
 captions = [d[1] for d in data]
-tokens = cat([tokenize(sentence) for sentence in captions]...,dims=1)
+tokens = vcat([tokenize(sentence) for sentence in captions]...)
 vocab = unique(tokens)
 # Sort according to frequencies
 freqs = reverse(sort(collect(countmap(tokens)),by=x->x[2]))
@@ -71,16 +74,20 @@ function extract_embedding_features(image_names)
     
     features = Dict()
     for im_name in image_names
-    	println(im_name)
-
-        if im_name in keys(features)
-            continue
-        end
+	try
+	    	println(im_name)
+	
+       		if im_name in keys(features)
+            		continue
+	        end
+        	
+	        img = Metalhead.preprocess(load(im_name)) |> gpu
+	        out = vgg(img)
         
-        img = Metalhead.preprocess(load(im_name)) |> gpu
-        out = vgg(img)
-        
-        features[im_name] = out |> cpu
+        	features[im_name] = out |> cpu
+	catch
+		continue
+	end
     end
     
     save("features.jld","features",features)
@@ -102,7 +109,11 @@ function get_mb(idx,features)
     mb_targets = []
     
     for i in 1:length(img_names)
-         push!(mb_features,features[img_names[i]])
+	 try
+         	push!(mb_features,features[img_names[i]])
+	 catch
+		continue
+	 end
     end
     
     mb_features = hcat(mb_features...)
@@ -136,7 +147,7 @@ end
 
 cnn_encoder = Chain(Dense(4096,EMBEDDING_DIM),x->relu.(x)) |> gpu
 embedding = Chain(Dense(length(vocab),EMBEDDING_DIM)) |> gpu
-rnn_decoder = Chain(LSTM(EMBEDDING_DIM,HIDDEN_DIM)) |> gpu
+rnn_decoder = LSTM(EMBEDDING_DIM,HIDDEN_DIM) |> gpu
 decoder = Chain(Dense(HIDDEN_DIM,length(vocab))) |> gpu
 
 function zero_grad_models()
@@ -160,8 +171,8 @@ function to_cpu()
 	decoder = decoder |> cpu
 end
 
-function reset()
-    Flux.reset!(rnn_decoder.layers[1])
+function reset(rnn_decoder)
+    Flux.reset!(rnn_decoder)
 end
 
 function save_models(cnn_encoder,embedding,rnn_decoder,decoder)
@@ -170,11 +181,16 @@ function save_models(cnn_encoder,embedding,rnn_decoder,decoder)
 	rnn_decoder = rnn_decoder |> cpu
 	decoder = decoder |> cpu
 
-    reset()
+    reset(rnn_decoder)
     @save "cnn_encoder.bson" cnn_encoder
     @save "embedding.bson" embedding
     @save "rnn_decoder.bson" rnn_decoder
     @save "decoder.bson" decoder
+
+	cnn_encoder = cnn_encoder |> gpu
+	embedding = embedding |> gpu
+	rnn_decoder = rnn_decoder |> gpu
+	decoder = decoder |> gpu
 end
 
 function load_models()
@@ -190,7 +206,9 @@ end
 println("Move models to respective device...")
 
 function get_loss_val(mb_captions,mb_features,mb_targets)
-    reset()
+    reset(rnn_decoder)
+    # println(mean(rnn_decoder.state[1]))
+    # println(mean(rnn_decoder.state[2]))
     lstm_inp = cnn_encoder(mb_features)
     word_embeddings = embedding.(mb_captions)
     lstm_out = rnn_decoder(lstm_inp)
@@ -206,15 +224,25 @@ function train_step(idx)
 	global global_step
     mb_captions,mb_features,mb_targets = get_mb(idx,features)
 
+    # println(size(mb_features))
+    if size(mb_features) == (0,)
+		return
+    end
     # Move data to device
     mb_captions = gpu.(mb_captions)
     mb_features =mb_features |> gpu
     mb_targets = gpu.(mb_targets)
-
-    zero_grad_models()
-    Flux.back!(get_loss_val(mb_captions,mb_features,mb_targets))
-    opt()
+    
+    try
+    	zero_grad_models()
+    	Flux.back!(get_loss_val(mb_captions,mb_features,mb_targets))
+    	opt()
+    catch
+	return
+    end
+    
     global_step += 1
+    # println("Minibatch training done...")
     
     if global_step % LOG_FREQUENCY == 0
         println("---Global Step : $(global_step)")
@@ -238,7 +266,7 @@ function train_step(idx)
 end
 
 function train()
-	println(cnn_encoder)
+	# println(cnn_encoder)
 	for epoch in 1:EPOCHS
 		for idx in mb_idxs
 	    	train_step(idx)

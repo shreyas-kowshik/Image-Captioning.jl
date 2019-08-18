@@ -15,7 +15,7 @@ using JLD
 using BSON:@save,@load
 
 include("utils.jl")
-BASE_PATH = "../../data/"
+BASE_PATH = "../../../references/mscoco"
 SAVE_PATH = "../save/"
 
 #--------HYPERPARAMETERS----------#

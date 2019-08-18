@@ -1,12 +1,13 @@
 using Pkg
-Pkg.activate(".")
+Pkg.activate("..")
 using CUDAnative
-device!(1)
+device!(0)
 using JSON
 using WordTokenizers
 using Statistics
 using StatsBase
 using Flux,CuArrays
+using Flux.Tracker:update!
 using Flux:onehot
 using Base.Iterators:partition
 using Metalhead
@@ -14,12 +15,13 @@ using JLD
 using BSON:@save,@load
 
 include("utils.jl")
-BASE_PATH = "../../references/mscoco/"
+BASE_PATH = "../../data/"
+SAVE_PATH = "../save/"
 
 #--------HYPERPARAMETERS----------#
-NUM_SENTENCES = 30000
+NUM_SENTENCES = 7
 # Find top-k tokens
-K = 5000
+K = 5
 BATCH_SIZE = 64
 EMBEDDING_DIM = 256
 HIDDEN_DIM = 512
@@ -58,6 +60,9 @@ vocab = [top_k_tokens...,"<UNK>","<PAD>"]
 # Define mappings
 word2idx = Dict(word=>i for (i,word) in enumerate(vocab))
 idx2word = Dict(value=>key for (key,value) in word2idx)
+# Save the mappings for generation time
+save("word2idx.jld","word2idx",word2idx)
+save("idx2word.jld","idx2word",idx2word)
 SEQ_LEN = max_length_sentence
 # Now - tokenized_captions contains the tokens for each caption in the form of an array
 
@@ -90,11 +95,11 @@ function extract_embedding_features(image_names)
 	end
     end
     
-    save("features.jld","features",features)
+    save(string(SAVE_PATH,"features.jld"),"features",features)
 end
 
 function load_embedding_features()
-    load("features.jld")["features"]
+    load(string(SAVE_PATH,"features.jld"))["features"]
 end
 
 extract_embedding_features(image_names)
@@ -109,11 +114,7 @@ function get_mb(idx,features)
     mb_targets = []
     
     for i in 1:length(img_names)
-	 try
-         	push!(mb_features,features[img_names[i]])
-	 catch
-		continue
-	 end
+     	push!(mb_features,features[img_names[i]])
     end
     
     mb_features = hcat(mb_features...)
@@ -157,20 +158,6 @@ function zero_grad_models()
     zero_grad!(decoder)
 end
 
-function to_device()
-	cnn_encoder = cnn_encoder |> device
-	embedding = embedding |> device
-	rnn_decoder = rnn_decoder |> device
-	decoder = decoder |> device
-end
-
-function to_cpu()
-	cnn_encoder = cnn_encoder |> cpu
-	embedding = embedding |> cpu
-	rnn_decoder = rnn_decoder |> cpu
-	decoder = decoder |> cpu
-end
-
 function reset(rnn_decoder)
     Flux.reset!(rnn_decoder)
 end
@@ -182,10 +169,10 @@ function save_models(cnn_encoder,embedding,rnn_decoder,decoder)
 	decoder = decoder |> cpu
 
     reset(rnn_decoder)
-    @save "cnn_encoder.bson" cnn_encoder
-    @save "embedding.bson" embedding
-    @save "rnn_decoder.bson" rnn_decoder
-    @save "decoder.bson" decoder
+    @save string(SAVE_PATH,"cnn_encoder.bson") cnn_encoder
+    @save string(SAVE_PATH,"embedding.bson") embedding
+    @save string(SAVE_PATH,"rnn_decoder.bson") rnn_decoder
+    @save string(SAVE_PATH,"decoder.bson") decoder
 
 	cnn_encoder = cnn_encoder |> gpu
 	embedding = embedding |> gpu
@@ -194,10 +181,10 @@ function save_models(cnn_encoder,embedding,rnn_decoder,decoder)
 end
 
 function load_models()
-    @load "cnn_encoder.bson" cnn_encoder
-    @load "embedding.bson" embedding
-    @load "rnn_decoder.bson" rnn_decoder
-    @load "decoder.bson" decoder
+    @load string(SAVE_PATH,"cnn_encoder.bson") cnn_encoder
+    @load string(SAVE_PATH,"embedding.bson") embedding
+    @load string(SAVE_PATH,"rnn_decoder.bson") rnn_decoder
+    @load string(SAVE_PATH,"decoder.bson") decoder
     to_device()
 end
 
@@ -207,8 +194,6 @@ println("Move models to respective device...")
 
 function get_loss_val(mb_captions,mb_features,mb_targets)
     reset(rnn_decoder)
-    # println(mean(rnn_decoder.state[1]))
-    # println(mean(rnn_decoder.state[2]))
     lstm_inp = cnn_encoder(mb_features)
     word_embeddings = embedding.(mb_captions)
     lstm_out = rnn_decoder(lstm_inp)
@@ -218,31 +203,25 @@ end
 
 model_params = params(params(cnn_encoder)...,params(embedding)...,params(rnn_decoder)...,params(decoder)...)
 lr = 1e-4
-opt = ADAM(model_params,lr)
+opt = ADAM(lr)
 
 function train_step(idx)
 	global global_step
     mb_captions,mb_features,mb_targets = get_mb(idx,features)
 
-    # println(size(mb_features))
-    if size(mb_features) == (0,)
-		return
-    end
+  #   if size(mb_features) == (0,)
+		# return
+  #   end
+    
     # Move data to device
     mb_captions = gpu.(mb_captions)
-    mb_features =mb_features |> gpu
+    mb_features = mb_features |> gpu
     mb_targets = gpu.(mb_targets)
-    
-    try
-    	zero_grad_models()
-    	Flux.back!(get_loss_val(mb_captions,mb_features,mb_targets))
-    	opt()
-    catch
-	return
-    end
+
+    gs = Tracker.gradient(() -> get_loss_val(mb_captions,mb_features,mb_targets),model_params)
+    update!(opt,model_params,gs)
     
     global_step += 1
-    # println("Minibatch training done...")
     
     if global_step % LOG_FREQUENCY == 0
         println("---Global Step : $(global_step)")
@@ -250,23 +229,12 @@ function train_step(idx)
     end
     
     if global_step % SAVE_FREQUENCY == 0
-  #   	cnn_encoder = cnn_encoder |> cpu
-		# embedding = embedding |> cpu
-		# rnn_decoder = rnn_decoder |> cpu
-		# decoder = decoder |> cpu
-
         save_models(cnn_encoder,embedding,rnn_decoder,decoder)
         println("Saved Models!")
-
-  #       cnn_encoder = cnn_encoder |> gpu
-		# embedding = embedding |> gpu
-		# rnn_decoder = rnn_decoder |> gpu
-		# decoder = decoder |> gpu
     end
 end
 
 function train()
-	# println(cnn_encoder)
 	for epoch in 1:EPOCHS
 		for idx in mb_idxs
 	    	train_step(idx)

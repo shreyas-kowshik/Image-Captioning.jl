@@ -15,8 +15,8 @@ using JLD
 using BSON:@save,@load
 
 include("utils.jl")
-BASE_PATH = "../../../references/mscoco"
-SAVE_PATH = "../save/"
+BASE_PATH = "../../../references/mscoco" # ADD Path for the dataset
+SAVE_PATH = "../save/" # Add Path to save the cache files and model weights
 
 #--------HYPERPARAMETERS----------#
 NUM_SENTENCES = 7
@@ -209,9 +209,9 @@ function train_step(idx)
 	global global_step
     mb_captions,mb_features,mb_targets = get_mb(idx,features)
 
-  #   if size(mb_features) == (0,)
-		# return
-  #   end
+    if size(mb_features) == (0,)
+		return
+    end
     
     # Move data to device
     mb_captions = gpu.(mb_captions)
